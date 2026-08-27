@@ -1,0 +1,69 @@
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.security import get_current_device_id, verify_device_id
+from app.schemas.media import MediaMessageResponse
+from app.services.media_service import (
+    AttachmentNotFoundError,
+    MediaFileError,
+    MediaService,
+    UnsupportedMediaTypeError,
+)
+from app.services.message_service import ChatAccessDeniedError, ChatNotFoundError, DeviceNotFoundError
+from app.services.websocket_manager import chat_connections
+from app.services.push_service import PushService
+
+
+router = APIRouter(tags=["media"])
+
+
+@router.post("/chats/{chat_id}/media", response_model=MediaMessageResponse, status_code=201)
+async def upload_media(
+    chat_id: UUID,
+    sender_device_id: UUID = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    authenticated_device_id: UUID | None = Depends(get_current_device_id),
+) -> MediaMessageResponse:
+    verify_device_id(authenticated_device_id, sender_device_id)
+    try:
+        result = await MediaService.upload(db, chat_id, sender_device_id, file)
+        await PushService.notify_chat_message(
+            db,
+            chat_id,
+            sender_device_id,
+            result.message.sender_type.value,
+            result.message.id,
+            result.message.message_type.value,
+        )
+        await chat_connections.broadcast(
+            chat_id, {"event": "message.created", "data": result.message.model_dump(mode="json")}
+        )
+        return result
+    except ChatAccessDeniedError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except (ChatNotFoundError, DeviceNotFoundError) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (UnsupportedMediaTypeError, MediaFileError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/media/{attachment_id}")
+async def download_media(
+    attachment_id: UUID,
+    requester_device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    authenticated_device_id: UUID | None = Depends(get_current_device_id),
+) -> FileResponse:
+    verify_device_id(authenticated_device_id, requester_device_id)
+    try:
+        attachment, path = await MediaService.get_for_download(db, attachment_id, requester_device_id)
+        return FileResponse(path, media_type=attachment.mime_type, filename=attachment.original_name)
+    except ChatAccessDeniedError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except (AttachmentNotFoundError, ChatNotFoundError, DeviceNotFoundError) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error

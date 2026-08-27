@@ -1,0 +1,42 @@
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class BanCreateRequest(BaseModel):
+    issued_by_device_id: UUID
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class BanRevokeRequest(BaseModel):
+    revoked_by_device_id: UUID
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class BanResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    witness_id: UUID
+    ban_level: int
+    reason: str
+    issued_by_employee_id: UUID
+    issued_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    revoked_by_employee_id: UUID | None
+    comment: str | None
+
+
+class BanListResponse(BaseModel):
+    items: list[BanResponse]
+
+
+class ActiveBanResponse(BaseModel):
+    active: bool
+    id: UUID | None = None
+    ban_level: int | None = None
+    issued_at: datetime | None = None
+    expires_at: datetime | None = None
+    reason: str | None = None
