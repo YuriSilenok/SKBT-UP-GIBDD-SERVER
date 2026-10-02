@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+peewee
+psycopg2-binary
+pydantic-settings
+python-multipart
+pytest
+httpx
+google-auth
+requests
+openpyxl
