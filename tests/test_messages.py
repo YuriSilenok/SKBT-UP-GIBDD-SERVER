@@ -1,4 +1,12 @@
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
+from PIL import Image
+
+def valid_jpeg():
+    out = BytesIO()
+    Image.new("RGB", (2, 2), "white").save(out, format="JPEG")
+    return out.getvalue()
+
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -24,6 +32,10 @@ def register(client, client_app: str, fingerprint: str) -> dict:
         json={"fingerprint_hash": fingerprint * 64},
     )
     assert response.status_code == 200
+    if client_app == "eyewitness":
+        from app.services.privacy import grant_consent, CONSENT_VERSION
+        from app.models.device import Device
+        grant_consent(Device.get_by_id(response.json()["device_id"]), CONSENT_VERSION)
     return response.json()
 
 
@@ -76,72 +88,24 @@ def test_eyewitness_sends_text_and_employee_reads_chat(client):
     ]
 
 
-def test_employee_answers_chat_and_marks_message_delivered_once(client):
+def test_employee_cannot_reply_but_can_mark_received(client):
     observer = register(client, "eyewitness", "c")
     chief = register(client, "employee", "d")
+    created = client.post("/api/v1/messages", headers=auth_headers(observer["access_token"], "eyewitness"), json={"message_type": "TEXT", "text": "Номер и обстоятельства"}).json()
+    answer = client.post("/api/v1/messages", headers=auth_headers(chief["access_token"], "employee"), json={"message_type": "TEXT", "observer_device_id": observer["device_id"], "text": "Ответ"})
+    assert answer.status_code == 403
+    first = client.patch(f"/api/v1/messages/{created['message_id']}/delivered", headers=auth_headers(chief["access_token"], "employee"))
+    again = client.patch(f"/api/v1/messages/{created['message_id']}/delivered", headers=auth_headers(chief["access_token"], "employee"))
+    assert first.status_code == again.status_code == 200
+    assert first.json()["delivered_at"] == again.json()["delivered_at"]
+    assert Message.select().count() == 1
 
-    first = client.post(
-        "/api/v1/messages",
-        headers=auth_headers(observer["access_token"], "eyewitness"),
-        json={"message_type": "TEXT", "text": "Стою у обочины"},
-    ).json()
-    answer = client.post(
-        "/api/v1/messages",
-        headers=auth_headers(chief["access_token"], "employee"),
-        json={
-            "message_type": "TEXT",
-            "observer_device_id": observer["device_id"],
-            "text": "Инспектор выехал",
-        },
-    )
-    delivered = client.patch(
-        f"/api/v1/messages/{first['message_id']}/delivered",
-        headers=auth_headers(chief["access_token"], "employee"),
-    )
-    delivered_again = client.patch(
-        f"/api/v1/messages/{first['message_id']}/delivered",
-        headers=auth_headers(chief["access_token"], "employee"),
-    )
-
-    assert answer.status_code == 200
-    assert answer.json()["observer_device_id"] == observer["device_id"]
-    assert answer.json()["sender_device_id"] == chief["device_id"]
-    assert answer.json()["text"] == "Инспектор выехал"
-
-    assert delivered.status_code == 200
-    assert delivered.json()["delivered_at"] is not None
-    assert delivered_again.status_code == 200
-    assert delivered_again.json()["delivered_at"] == delivered.json()["delivered_at"]
-    assert Message.select().count() == 2
-
-
-def test_employee_own_undelivered_message_is_not_unread_in_chat_list(client):
+def test_rejected_employee_reply_does_not_create_chat(client):
     observer = register(client, "eyewitness", "A")
     chief = register(client, "employee", "B")
-
-    answer = client.post(
-        "/api/v1/messages",
-        headers=auth_headers(chief["access_token"], "employee"),
-        json={
-            "message_type": "TEXT",
-            "observer_device_id": observer["device_id"],
-            "text": "Inspector is on the way",
-        },
-    )
-    chats = client.get(
-        "/api/v1/chats",
-        headers=auth_headers(chief["access_token"], "employee"),
-    )
-
-    assert answer.status_code == 200
-    assert answer.json()["delivered_at"] is None
-
-    assert chats.status_code == 200
-    assert chats.json()["chats"][0]["last_message_id"] == answer.json()["message_id"]
-    assert chats.json()["chats"][0]["last_sender_device_id"] == chief["device_id"]
-    assert chats.json()["chats"][0]["last_delivered_at"] is None
-    assert chats.json()["chats"][0]["unread_count"] == 0
-
+    response = client.post("/api/v1/messages", headers=auth_headers(chief["access_token"], "employee"), json={"message_type": "TEXT", "observer_device_id": observer["device_id"], "text": "Answer"})
+    assert response.status_code == 403
+    assert client.get("/api/v1/chats", headers=auth_headers(chief["access_token"], "employee")).json()["chats"] == []
 
 def test_chat_list_unread_count_uses_observer_messages_only(client):
     observer = register(client, "eyewitness", "A")
@@ -275,61 +239,16 @@ def test_static_location_coordinates_are_validated(client):
     assert bad_longitude.status_code == 422
 
 
-def test_employee_sends_media_to_observer_chat(client):
-    observer = register(client, "eyewitness", "n")
-    chief = register(client, "employee", "o")
-    storage_key = "media/2026/08/photo.jpg"
-    media_path = Path(get_settings().media_storage_dir) / storage_key
-    media_path.parent.mkdir(parents=True, exist_ok=True)
-    media_path.write_bytes(b"jpeg-bytes")
+def test_arbitrary_storage_key_attachment_is_disabled(client):
+    observer = register(client, "eyewitness", "L")
+    response = client.post("/api/v1/messages/media", headers=auth_headers(observer["access_token"], "eyewitness"), json={"storage_key": "other-user/photo.jpg", "mime_type": "image/jpeg"})
+    assert response.status_code == 410
+    assert Message.select().count() == 0
 
-    created = client.post(
-        "/api/v1/messages/media",
-        headers=auth_headers(chief["access_token"], "employee"),
-        json={
-            "observer_device_id": observer["device_id"],
-            "storage_key": storage_key,
-            "mime_type": "image/jpeg",
-        },
-    )
-    chats = client.get(
-        "/api/v1/chats",
-        headers=auth_headers(chief["access_token"], "employee"),
-    )
-
-    assert created.status_code == 200
-    assert created.json()["message_type"] == "MEDIA"
-    assert created.json()["observer_device_id"] == observer["device_id"]
-    assert created.json()["sender_device_id"] == chief["device_id"]
-    assert created.json()["text"] is None
-    assert created.json()["static_location"] is None
-    assert created.json()["media"] == {
-        "storage_key": storage_key,
-        "mime_type": "image/jpeg",
-        "last_viewed_at": None,
-    }
-    assert Media.select().count() == 1
-
-    assert chats.status_code == 200
-    assert chats.json()["chats"][0]["last_message_type"] == "MEDIA"
-    assert chats.json()["chats"][0]["last_media"]["storage_key"] == storage_key
-
-
-def test_media_metadata_endpoint_requires_existing_file(client):
-    observer = register(client, "eyewitness", "z")
-
-    created = client.post(
-        "/api/v1/messages/media",
-        headers=auth_headers(observer["access_token"], "eyewitness"),
-        json={
-            "storage_key": "media/missing.jpg",
-            "mime_type": "image/jpeg",
-        },
-    )
-
-    assert created.status_code == 404
-    assert created.json()["detail"] == "Media file not found"
-
+def test_storage_key_endpoint_rejects_missing_file_too(client):
+    observer = register(client, "eyewitness", "M")
+    response = client.post("/api/v1/messages/media", headers=auth_headers(observer["access_token"], "eyewitness"), json={"storage_key": "missing.jpg", "mime_type": "image/jpeg"})
+    assert response.status_code == 410
 
 def test_eyewitness_uploads_media_file_and_employee_downloads_it(client):
     observer = register(client, "eyewitness", "v")
@@ -338,7 +257,7 @@ def test_eyewitness_uploads_media_file_and_employee_downloads_it(client):
     created = client.post(
         "/api/v1/messages/media/upload",
         headers=auth_headers(observer["access_token"], "eyewitness"),
-        files={"file": ("photo.jpg", b"jpeg-bytes", "image/jpeg")},
+        files={"file": ("photo.jpg", valid_jpeg(), "image/jpeg")},
     )
     downloaded = client.get(
         f"/api/v1/messages/{created.json()['message_id']}/media",
@@ -354,30 +273,17 @@ def test_eyewitness_uploads_media_file_and_employee_downloads_it(client):
     assert Media.select().count() == 1
 
     assert downloaded.status_code == 200
-    assert downloaded.content == b"jpeg-bytes"
+    assert downloaded.content == valid_jpeg()
     assert downloaded.headers["content-type"] == "image/jpeg"
     media = Media.get()
     assert media.last_viewed_at is not None
 
 
-def test_employee_uploads_media_file_to_observer_chat(client):
-    observer = register(client, "eyewitness", "x")
-    chief = register(client, "employee", "y")
-
-    created = client.post(
-        "/api/v1/messages/media/upload",
-        headers=auth_headers(chief["access_token"], "employee"),
-        data={"observer_device_id": observer["device_id"]},
-        files={"file": ("answer.png", b"png-bytes", "image/png")},
-    )
-
-    assert created.status_code == 200
-    assert created.json()["message_type"] == "MEDIA"
-    assert created.json()["observer_device_id"] == observer["device_id"]
-    assert created.json()["sender_device_id"] == chief["device_id"]
-    assert created.json()["media"]["mime_type"] == "image/png"
-    assert created.json()["media"]["storage_key"].endswith(".png")
-
+def test_employee_upload_is_forbidden(client):
+    observer = register(client, "eyewitness", "N")
+    chief = register(client, "employee", "O")
+    response = client.post("/api/v1/messages/media/upload", headers=auth_headers(chief["access_token"], "employee"), data={"observer_device_id": observer["device_id"]}, files={"file": ("photo.png", b"fake", "image/png")})
+    assert response.status_code == 403
 
 def test_media_download_requires_chat_access(client):
     observer = register(client, "eyewitness", "0")
@@ -386,7 +292,7 @@ def test_media_download_requires_chat_access(client):
     created = client.post(
         "/api/v1/messages/media/upload",
         headers=auth_headers(observer["access_token"], "eyewitness"),
-        files={"file": ("photo.jpg", b"jpeg-bytes", "image/jpeg")},
+        files={"file": ("photo.jpg", valid_jpeg(), "image/jpeg")},
     )
     downloaded = client.get(
         f"/api/v1/messages/{created.json()['message_id']}/media",
@@ -417,11 +323,11 @@ def test_expired_media_file_is_not_downloaded(client):
     created = client.post(
         "/api/v1/messages/media/upload",
         headers=auth_headers(observer["access_token"], "eyewitness"),
-        files={"file": ("photo.jpg", b"jpeg-bytes", "image/jpeg")},
+        files={"file": ("photo.jpg", valid_jpeg(), "image/jpeg")},
     ).json()
     media = Media.get()
     media_path = Path(get_settings().media_storage_dir) / media.storage_key
-    Message.update(created_at=datetime.now(UTC) - timedelta(days=8)).where(
+    Message.update(created_at=datetime.now(UTC) - timedelta(days=31)).where(
         Message.id == created["message_id"]
     ).execute()
 
@@ -431,20 +337,19 @@ def test_expired_media_file_is_not_downloaded(client):
     )
 
     assert downloaded.status_code == 410
-    assert downloaded.json()["detail"] == "Media file has expired"
     assert not media_path.exists()
 
 
-def test_recent_media_view_extends_ttl(client):
+def test_recent_media_view_does_not_extend_30_day_limit(client):
     observer = register(client, "eyewitness", "8")
     chief = register(client, "employee", "9")
 
     created = client.post(
         "/api/v1/messages/media/upload",
         headers=auth_headers(observer["access_token"], "eyewitness"),
-        files={"file": ("photo.jpg", b"jpeg-bytes", "image/jpeg")},
+        files={"file": ("photo.jpg", valid_jpeg(), "image/jpeg")},
     ).json()
-    Message.update(created_at=datetime.now(UTC) - timedelta(days=8)).where(
+    Message.update(created_at=datetime.now(UTC) - timedelta(days=31)).where(
         Message.id == created["message_id"]
     ).execute()
     Media.update(last_viewed_at=utc_now()).where(
@@ -456,31 +361,33 @@ def test_recent_media_view_extends_ttl(client):
         headers=auth_headers(chief["access_token"], "employee"),
     )
 
-    assert downloaded.status_code == 200
-    assert downloaded.content == b"jpeg-bytes"
+    assert downloaded.status_code == 410
 
 
-def test_media_upload_cleans_expired_files(client):
+
+def test_scheduled_cleanup_removes_expired_files(client):
     observer = register(client, "eyewitness", "!")
 
     old_message = client.post(
         "/api/v1/messages/media/upload",
         headers=auth_headers(observer["access_token"], "eyewitness"),
-        files={"file": ("old.jpg", b"old-bytes", "image/jpeg")},
+        files={"file": ("old.jpg", valid_jpeg(), "image/jpeg")},
     ).json()
     old_media = Media.get()
     old_media_path = Path(get_settings().media_storage_dir) / old_media.storage_key
-    Message.update(created_at=datetime.now(UTC) - timedelta(days=8)).where(
+    Message.update(created_at=datetime.now(UTC) - timedelta(days=31)).where(
         Message.id == old_message["message_id"]
     ).execute()
 
     new_message = client.post(
         "/api/v1/messages/media/upload",
         headers=auth_headers(observer["access_token"], "eyewitness"),
-        files={"file": ("new.jpg", b"new-bytes", "image/jpeg")},
+        files={"file": ("new.jpg", valid_jpeg(), "image/jpeg")},
     )
 
     assert new_message.status_code == 200
+    from app.services.privacy import cleanup_personal_data
+    assert cleanup_personal_data() == 1
     assert not old_media_path.exists()
 
 
@@ -510,7 +417,7 @@ def test_photo_upload_limit_is_10_mb(client):
     assert created.json()["detail"] == "Media file is too large"
 
 
-def test_gif_upload_can_be_larger_than_photo_limit(client):
+def test_arbitrary_bytes_are_not_accepted_as_gif(client):
     observer = register(client, "eyewitness", "5")
 
     created = client.post(
@@ -519,8 +426,8 @@ def test_gif_upload_can_be_larger_than_photo_limit(client):
         files={"file": ("animation.gif", b"x" * (10 * 1024 * 1024 + 1), "image/gif")},
     )
 
-    assert created.status_code == 200
-    assert created.json()["media"]["mime_type"] == "image/gif"
+    assert created.status_code == 415
+
 
 
 def test_common_message_endpoint_accepts_only_text(client):

@@ -26,6 +26,8 @@ def generate_excel_report() -> bytes:
     _fill_bans_sheet(workbook.active)
     _fill_roles_sheet(workbook.create_sheet("Roles"))
     _fill_messages_sheet(workbook.create_sheet("Messages"))
+    _fill_consent_sheet(workbook.create_sheet("Consents"))
+    _fill_receipt_sheet(workbook.create_sheet("Receipts"))
 
     stream = BytesIO()
     workbook.save(stream)
@@ -164,3 +166,17 @@ def _append_header(sheet, values: list[str]) -> None:
 
 def _datetime_value(value):
     return value.isoformat() if value is not None else None
+
+
+def _fill_consent_sheet(sheet):
+    from app.models.privacy import ConsentEvent
+    _append_header(sheet, ["device_id", "version", "action", "recorded_at", "clicked_at"])
+    for event in ConsentEvent.select().order_by(ConsentEvent.created_at):
+        sheet.append([str(event.device_id), event.version, event.action, _datetime_value(event.created_at), _datetime_value(event.clicked_at)])
+
+
+def _fill_receipt_sheet(sheet):
+    from app.models.privacy import Receipt
+    _append_header(sheet, ["message_id", "received_by", "received_at"])
+    for receipt in Receipt.select().order_by(Receipt.received_at):
+        sheet.append([str(receipt.message_id), str(receipt.received_by), _datetime_value(receipt.received_at)])

@@ -45,6 +45,9 @@ class RealtimeManager:
     def disconnect(self, connection: RealtimeConnection) -> None:
         self._connections.discard(connection)
 
+    def connection_count(self, device_id: str | None = None) -> int:
+        return sum(1 for connection in self._connections if device_id is None or connection.device_id == device_id)
+
     def publish_to_devices(self, device_ids: set[str], event: dict) -> None:
         for connection in list(self._connections):
             if connection.device_id in device_ids:
@@ -211,7 +214,7 @@ def _ban_number(ban: Ban) -> int:
 
 def _as_utc_aware(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=_local_timezone()).astimezone(UTC)
+        return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 

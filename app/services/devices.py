@@ -1,4 +1,6 @@
-from peewee import IntegrityError, PostgresqlDatabase
+from peewee import PostgresqlDatabase
+from fastapi import HTTPException
+from app.services.auth import get_device_by_access_token
 
 from app.db.database import database_proxy
 from app.models.device import Device, utc_now
@@ -14,67 +16,75 @@ def register_device(
     fingerprint_hash: str,
     client_app: ClientApp,
     push_token: str | None = None,
+    access_token: str | None = None,
 ) -> tuple[Device, str]:
     with database_proxy.atomic():
-        device, _ = Device.get_or_create(
+        _lock_chief_bootstrap_for_transaction()
+        device, created = Device.get_or_create(
             fingerprint_hash=fingerprint_hash,
             defaults={
-                "push_token": push_token,
+                "push_token": None,
                 "last_activity_at": utc_now(),
+                "client_app": client_app.value,
             },
         )
 
-        changes: dict[str, object] = {"last_activity_at": utc_now()}
-        if push_token is not None and device.push_token != push_token:
-            changes["push_token"] = push_token
+        if not created:
+            actor = get_device_by_access_token(access_token) if access_token else None
+            if actor is None or actor.id != device.id:
+                raise HTTPException(401, "Existing device requires its current bearer token")
+            if device.client_app is not None and device.client_app != client_app.value:
+                raise HTTPException(403, "Device belongs to another client application")
+
+        changes: dict[str, object] = {"last_activity_at": utc_now(), "client_app": client_app.value, "push_token": None}
 
         if changes:
             Device.update(**changes).where(Device.id == device.id).execute()
             device = Device.get_by_id(device.id)
 
-    if client_app == ClientApp.EMPLOYEE and device.current_role is None:
-        _bootstrap_chief_if_needed(device)
-        device = Device.get_by_id(device.id)
+        if client_app == ClientApp.EMPLOYEE and device.current_role is None:
+            _bootstrap_chief_if_needed(device)
+            device = Device.get_by_id(device.id)
 
-    access_token = issue_access_token(device)
-    return device, access_token
+        access_token = issue_access_token(device)
+        return device, access_token
 
 
 def _bootstrap_chief_if_needed(device: Device) -> None:
-    try:
-        with database_proxy.atomic():
-            _lock_chief_bootstrap_for_transaction()
+    with database_proxy.atomic():
+        _lock_chief_bootstrap_for_transaction()
 
-            chief_exists = (
-                Device.select(Device.id)
-                .where(Device.current_role == DeviceRole.CHIEF.value)
-                .exists()
-            )
-            if chief_exists:
-                return
+        if RoleEvent.select().where(RoleEvent.action == RoleAction.AUTO_ASSIGNED.value).exists():
+            return
 
-            updated = (
-                Device.update(
-                    current_role=DeviceRole.CHIEF.value,
-                    last_activity_at=utc_now(),
-                )
-                .where(
-                    (Device.id == device.id)
-                    & (Device.current_role.is_null(True))
-                )
-                .execute()
-            )
-            if updated != 1:
-                return
+        chief_exists = (
+            Device.select(Device.id)
+            .where(Device.current_role == DeviceRole.CHIEF.value)
+            .exists()
+        )
+        if chief_exists:
+            return
 
-            RoleEvent.create(
-                actor_device=None,
-                target_device=device.id,
-                action=RoleAction.AUTO_ASSIGNED.value,
-                role=DeviceRole.CHIEF.value,
+        updated = (
+            Device.update(
+                current_role=DeviceRole.CHIEF.value,
+                last_activity_at=utc_now(),
             )
-    except IntegrityError:
-        return
+            .where(
+                (Device.id == device.id)
+                & (Device.current_role.is_null(True))
+            )
+            .execute()
+        )
+        if updated != 1:
+            return
+
+        RoleEvent.create(
+            actor_device=None,
+            target_device=device.id,
+            action=RoleAction.AUTO_ASSIGNED.value,
+            role=DeviceRole.CHIEF.value,
+        )
 
 
 def _lock_chief_bootstrap_for_transaction() -> None:

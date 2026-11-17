@@ -1,11 +1,14 @@
 import pytest
+import os
+import uuid
 from fastapi.testclient import TestClient
-from peewee import SqliteDatabase
+from peewee import SqliteDatabase, PostgresqlDatabase
 
 from app.core.config import get_settings
 from app.db.database import create_tables, database_proxy
 from app.main import create_app
 from app.models.ban import Ban
+from app.models.privacy import ConsentEvent, Receipt
 from app.models.device import Device
 from app.models.live_location_session import LiveLocationSession
 from app.models.location_point import LocationPoint
@@ -20,11 +23,18 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MEDIA_STORAGE_DIR", str(tmp_path / "media"))
     get_settings.cache_clear()
 
-    test_database = SqliteDatabase(tmp_path / "test.db")
+    postgres = os.environ.get("GIBDD_TEST_POSTGRES") == "1"
+    schema = "test_" + uuid.uuid4().hex
+    test_database = PostgresqlDatabase(
+        "gibdd_test", host="127.0.0.1", port=55439, user="gibdd_test",
+        options=f"-c timezone=UTC -c search_path={schema}",
+    ) if postgres else SqliteDatabase(tmp_path / "test.db")
     database_proxy.initialize(test_database)
     test_database.bind(
         [
             Device,
+            ConsentEvent,
+            Receipt,
             RoleEvent,
             Message,
             StaticLocation,
@@ -37,6 +47,8 @@ def client(tmp_path, monkeypatch):
         bind_backrefs=False,
     )
     test_database.connect()
+    if postgres:
+        test_database.execute_sql(f'CREATE SCHEMA "{schema}"')
     create_tables()
 
     with TestClient(create_app(enable_lifespan=False)) as test_client:
@@ -52,8 +64,12 @@ def client(tmp_path, monkeypatch):
             Message,
             RoleEvent,
             Device,
+            ConsentEvent,
+            Receipt,
         ],
         safe=True,
     )
+    if postgres:
+        test_database.execute_sql(f'DROP SCHEMA "{schema}" CASCADE')
     test_database.close()
     get_settings.cache_clear()

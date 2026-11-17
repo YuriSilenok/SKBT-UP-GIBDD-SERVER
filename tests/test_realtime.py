@@ -16,6 +16,10 @@ def register(client, client_app: str, fingerprint: str) -> dict:
         json={"fingerprint_hash": fingerprint * 64},
     )
     assert response.status_code == 200
+    if client_app == "eyewitness":
+        from app.services.privacy import grant_consent, CONSENT_VERSION
+        from app.models.device import Device
+        grant_consent(Device.get_by_id(response.json()["device_id"]), CONSENT_VERSION)
     return response.json()
 
 
@@ -62,34 +66,17 @@ def test_employee_websocket_receives_eyewitness_text_message(client):
     assert event["message"]["text"] == "need help"
 
 
-def test_observer_websocket_receives_employee_answer(client):
+def test_observer_websocket_receives_automatic_receipt(client):
     observer = register(client, "eyewitness", "c")
     chief = register(client, "employee", "d")
-
-    with client.websocket_connect(
-        "/api/v1/realtime",
-        headers=auth_headers(observer["access_token"], "eyewitness"),
-    ) as websocket:
-        connected = websocket.receive_json()
-        assert connected["event"] == "connected"
-        assert connected["client_app"] == "eyewitness"
-
-        answer = client.post(
-            "/api/v1/messages",
-            headers=auth_headers(chief["access_token"], "employee"),
-            json={
-                "observer_device_id": observer["device_id"],
-                "message_type": "TEXT",
-                "text": "inspector is coming",
-            },
-        )
+    created = client.post("/api/v1/messages", headers=auth_headers(observer["access_token"], "eyewitness"), json={"message_type": "TEXT", "text": "Report"}).json()
+    with client.websocket_connect("/api/v1/realtime", headers=auth_headers(observer["access_token"], "eyewitness")) as websocket:
+        websocket.receive_json()
+        received = client.post(f"/api/v1/messages/{created['message_id']}/receipt", headers=auth_headers(chief["access_token"], "employee"))
+        assert received.status_code == 200
         event = websocket.receive_json()
-
-    assert answer.status_code == 200
-    assert event["event"] == "message_created"
-    assert event["message"]["message_id"] == answer.json()["message_id"]
-    assert event["message"]["sender_device_id"] == chief["device_id"]
-
+        assert event["event"] == "receipt_confirmed"
+        assert event["message_id"] == created["message_id"]
 
 def test_websocket_receives_live_location_point(client):
     observer = register(client, "eyewitness", "e")

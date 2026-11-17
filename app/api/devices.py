@@ -15,11 +15,14 @@ router = APIRouter(prefix="/api/v1/devices", tags=["devices"])
 def register(
     payload: DeviceRegisterRequest,
     client_app: ClientApp = Header(alias="X-Client-App"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> DeviceRegisterResponse:
+    scheme, _, token = (authorization or "").partition(" ")
     device, access_token = register_device(
         fingerprint_hash=payload.fingerprint_hash,
         client_app=client_app,
         push_token=payload.push_token,
+        access_token=token if scheme.lower() == "bearer" else None,
     )
 
     return DeviceRegisterResponse(

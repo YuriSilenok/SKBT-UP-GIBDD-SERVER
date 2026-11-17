@@ -25,19 +25,25 @@ def require_ban_issuer(actor: Device) -> None:
 def create_observer_ban(*, actor: Device, observer_device_id: UUID) -> Ban:
     require_ban_issuer(actor)
     observer = _get_device_or_404(observer_device_id)
+    if observer.client_app == "employee":
+        raise HTTPException(400, "Only eyewitness devices can be banned")
 
-    active_ban = get_active_ban(observer.id)
-    if active_ban is not None:
-        return active_ban
-
-    existing_bans_count = Ban.select().where(Ban.observer_device == observer.id).count()
-    started_at = utc_now()
-    ends_at = _ban_ends_at(
-        started_at=started_at,
-        existing_bans_count=existing_bans_count,
-    )
-
+    from app.services.devices import _lock_chief_bootstrap_for_transaction
     with database_proxy.atomic():
+        _lock_chief_bootstrap_for_transaction()
+        actor = Device.get_by_id(actor.id)
+        require_ban_issuer(actor)
+        active_ban = get_active_ban(observer.id)
+        if active_ban is not None:
+            return active_ban
+
+        existing_bans_count = Ban.select().where(Ban.observer_device == observer.id).count()
+        started_at = utc_now()
+        ends_at = _ban_ends_at(
+            started_at=started_at,
+            existing_bans_count=existing_bans_count,
+        )
+
         ban = Ban.create(
             observer_device=observer.id,
             issued_by_device=actor.id,
@@ -45,6 +51,7 @@ def create_observer_ban(*, actor: Device, observer_device_id: UUID) -> Ban:
             ends_at=ends_at,
         )
         Device.update(last_activity_at=started_at).where(Device.id == actor.id).execute()
+
 
     notify_observer_banned(ban)
     publish_observer_banned(ban)
@@ -125,7 +132,7 @@ def _get_device_or_404(device_id: UUID) -> Device:
 
 def _as_utc_aware(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=_local_timezone()).astimezone(UTC)
+        return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 

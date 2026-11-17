@@ -51,61 +51,47 @@ def list_employee_devices(actor: Device) -> list[Device]:
     )
 
 
-def assign_role(
-    *,
-    actor: Device,
-    target: Device,
-    role: DeviceRole,
-) -> tuple[Device, RoleAction | None]:
-    require_role_manager(actor, role)
-    old_role = target.current_role
-    if old_role == role.value:
-        return target, None
+def _validate_role_change(actor: Device | None, target: Device, new_role: str | None) -> None:
+    if new_role is not None and target.client_app == "eyewitness":
+        raise HTTPException(403, "Only employee devices can receive a staff role")
+    if actor is not None:
+        require_role_manager(actor, DeviceRole(new_role) if new_role else None)
+        if target.current_role == DeviceRole.CHIEF.value and actor.current_role != DeviceRole.CHIEF.value:
+            raise HTTPException(403, "Only CHIEF can change another CHIEF")
+    if target.current_role == DeviceRole.CHIEF.value and new_role != DeviceRole.CHIEF.value:
+        if Device.select().where(Device.current_role == DeviceRole.CHIEF.value).count() <= 1:
+            raise HTTPException(409, "The last CHIEF cannot be removed or demoted")
 
-    action = RoleAction.ASSIGNED if old_role is None else RoleAction.REPLACED
+
+def change_role(*, actor: Device | None, target: Device, new_role: str | None) -> tuple[Device, RoleAction | None]:
+    # Registration and every role-changing path use this same transaction lock.
+    from app.services.devices import _lock_chief_bootstrap_for_transaction
     with database_proxy.atomic():
-        Device.update(current_role=role.value, last_activity_at=utc_now()).where(
-            Device.id == target.id
-        ).execute()
-        role_event = RoleEvent.create(
-            actor_device=actor.id,
-            target_device=target.id,
-            action=action.value,
-            role=role.value,
+        _lock_chief_bootstrap_for_transaction()
+        target = get_device_or_404(str(target.id))
+        if actor is not None:
+            actor = get_device_or_404(str(actor.id))
+        _validate_role_change(actor, target, new_role)
+        old_role = target.current_role
+        if old_role == new_role:
+            return target, None
+        action = RoleAction.REMOVED if new_role is None else (
+            RoleAction.ASSIGNED if old_role is None else RoleAction.REPLACED
         )
-
+        Device.update(current_role=new_role, last_activity_at=utc_now()).where(Device.id == target.id).execute()
+        role_event = RoleEvent.create(
+            actor_device=actor.id if actor else None, target_device=target.id,
+            action=action.value, role=new_role or old_role,
+        )
     updated = Device.get_by_id(target.id)
-    notify_role_changed(role_event, old_role=old_role, new_role=role.value)
-    publish_role_changed(
-        role_event,
-        old_role=old_role,
-        new_role=role.value,
-    )
+    notify_role_changed(role_event, old_role=old_role, new_role=new_role)
+    publish_role_changed(role_event, old_role=old_role, new_role=new_role)
     return updated, action
 
 
+def assign_role(*, actor: Device, target: Device, role: DeviceRole) -> tuple[Device, RoleAction | None]:
+    return change_role(actor=actor, target=target, new_role=role.value)
+
+
 def remove_role(*, actor: Device, target: Device) -> tuple[Device, RoleAction | None]:
-    require_role_manager(actor)
-    removed_role = target.current_role
-    if removed_role is None:
-        return target, None
-
-    with database_proxy.atomic():
-        Device.update(current_role=None, last_activity_at=utc_now()).where(
-            Device.id == target.id
-        ).execute()
-        role_event = RoleEvent.create(
-            actor_device=actor.id,
-            target_device=target.id,
-            action=RoleAction.REMOVED.value,
-            role=removed_role,
-        )
-
-    updated = Device.get_by_id(target.id)
-    notify_role_changed(role_event, old_role=removed_role, new_role=None)
-    publish_role_changed(
-        role_event,
-        old_role=removed_role,
-        new_role=None,
-    )
-    return updated, RoleAction.REMOVED
+    return change_role(actor=actor, target=target, new_role=None)

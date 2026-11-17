@@ -27,7 +27,7 @@ def test_eyewitness_registration_is_idempotent(client):
     )
     second = client.post(
         "/api/v1/devices/register",
-        headers={"X-Client-App": "eyewitness"},
+        headers={"X-Client-App": "eyewitness", "Authorization": "Bearer " + first.json()["access_token"]},
         json=payload,
     )
 
@@ -46,7 +46,7 @@ def test_eyewitness_registration_is_idempotent(client):
     assert device.access_token_hash != second.json()["access_token"]
 
 
-def test_repeated_registration_updates_push_token(client):
+def test_registration_discards_obsolete_external_push_tokens(client):
     payload = {"fingerprint_hash": "n" * 64, "push_token": "old-token"}
 
     first = client.post(
@@ -56,14 +56,14 @@ def test_repeated_registration_updates_push_token(client):
     )
     second = client.post(
         "/api/v1/devices/register",
-        headers={"X-Client-App": "eyewitness"},
+        headers={"X-Client-App": "eyewitness", "Authorization": "Bearer " + first.json()["access_token"]},
         json={"fingerprint_hash": "n" * 64, "push_token": "new-token"},
     )
 
     assert first.status_code == 200
     assert second.status_code == 200
     assert first.json()["device_id"] == second.json()["device_id"]
-    assert Device.get_by_id(first.json()["device_id"]).push_token == "new-token"
+    assert Device.get_by_id(first.json()["device_id"]).push_token is None
 
 
 def test_first_employee_bootstraps_chief_once(client):

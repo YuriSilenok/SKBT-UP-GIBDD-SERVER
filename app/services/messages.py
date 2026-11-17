@@ -2,8 +2,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 from uuid import uuid4
+from threading import Lock
+
+MEDIA_STORAGE_LOCK = Lock()
 
 from fastapi import HTTPException, status
+from peewee import fn
+from app.models.ban import Ban
 
 from app.core.config import get_settings
 from app.db.database import database_proxy
@@ -26,7 +31,7 @@ from app.services.realtime import (
 
 EMPLOYEE_CHAT_ROLES = {"INSPECTOR", "ADMIN", "CHIEF"}
 LIVE_LOCATION_DURATION = timedelta(minutes=15)
-MEDIA_TTL = timedelta(days=7)
+MEDIA_TTL = timedelta(days=30)
 MEDIA_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 MEDIA_VIDEO_GIF_MAX_BYTES = 100 * 1024 * 1024
 MEDIA_UPLOAD_MAX_BYTES = MEDIA_VIDEO_GIF_MAX_BYTES
@@ -159,47 +164,63 @@ def create_media_message(
     return message
 
 
-def create_uploaded_media_message(
-    *,
-    sender: Device,
-    client_app: ClientApp,
-    filename: str | None,
-    mime_type: str | None,
-    content: bytes,
-    observer_device_id: UUID | None,
-) -> Message:
+def create_streamed_media_message(*, sender, client_app, filename, mime_type, source, observer_device_id):
     _require_sender_can_create_message(sender=sender, client_app=client_app)
-    cleanup_expired_media_files()
-
-    if not content:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Media file cannot be empty",
-        )
-
-    normalized_mime_type = _normalize_media_mime_type(mime_type)
-    _validate_media_size(
-        mime_type=normalized_mime_type,
-        size_bytes=len(content),
-    )
-
+    normalized = _normalize_media_mime_type(mime_type)
+    _resolve_observer_device(sender=sender, client_app=client_app, observer_device_id=observer_device_id)
     storage_key = _new_media_storage_key(filename)
-    file_path = _media_file_path(storage_key)
+    path = _media_file_path(storage_key)
+    root = Path(get_settings().media_storage_dir)
+    # Bound total disk use as well as individual requests. Production proxy adds shared quotas.
+    with MEDIA_STORAGE_LOCK:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.chmod(0o700)
+        used = sum(p.stat().st_size for p in root.rglob("*") if p.is_file()) if root.exists() else 0
+        if used >= 2 * 1024 ** 3:
+            raise HTTPException(507, "Media storage quota exceeded")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            import os
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as target:
+                while chunk := source.read(64 * 1024):
+                    size += len(chunk)
+                    _validate_media_size(mime_type=normalized, size_bytes=size)
+                    if used + size > 2 * 1024 ** 3:
+                        raise HTTPException(507, "Media storage quota exceeded")
+                    target.write(chunk)
+            if not size:
+                raise HTTPException(422, "Media file cannot be empty")
+            _validate_media_content(path, normalized)
+            return create_media_message(sender=sender, client_app=client_app, storage_key=storage_key,
+                mime_type=normalized, observer_device_id=observer_device_id)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
 
+
+def _validate_media_content(path: Path, mime_type: str) -> None:
+    if mime_type == "video/mp4":
+        with path.open("rb") as stream:
+            header = stream.read(64)
+        if len(header) < 12 or header[4:8] != b"ftyp":
+            raise HTTPException(415, "Invalid MP4 container")
+        return
+    from PIL import Image, UnidentifiedImageError
+    import warnings
+    expected = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP", "image/gif": "GIF"}
     try:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_bytes(content)
-        return create_media_message(
-            sender=sender,
-            client_app=client_app,
-            storage_key=storage_key,
-            mime_type=normalized_mime_type,
-            observer_device_id=observer_device_id,
-        )
-    except Exception:
-        if file_path.exists():
-            file_path.unlink()
-        raise
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                if image.format != expected[mime_type] or image.width * image.height > 40_000_000:
+                    raise HTTPException(415, "Image content does not match MIME or exceeds pixel limit")
+                if getattr(image, "n_frames", 1) > 1000:
+                    raise HTTPException(415, "Too many image frames")
+                image.verify()
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise HTTPException(415, "Invalid or excessively large image")
 
 
 def create_live_location_message(
@@ -342,42 +363,38 @@ def list_live_location_points(
     return list(query.order_by(LocationPoint.recorded_at.asc()).limit(limit))
 
 
-def list_chats(actor: Device) -> list[Message]:
+def _not_banned_at(moment):
+    return ~fn.EXISTS(Ban.select(Ban.id).where(
+        (Ban.observer_device == Message.observer_device)
+        & (Ban.started_at <= moment)
+        & (Ban.ends_at.is_null() | (Ban.ends_at > moment))
+    ))
+
+
+def list_chats(actor: Device, *, limit: int = 200, offset: int = 0) -> list[Message]:
     require_employee_chat_access(actor)
-    latest_by_observer: dict[str, Message] = {}
-
-    for message in Message.select().order_by(Message.created_at.desc(), Message.id.desc()):
-        observer_id = str(message.observer_device_id)
-        if observer_id not in latest_by_observer:
-            if (
-                actor.current_role != DeviceRole.CHIEF.value
-                and get_active_ban(message.observer_device_id) is not None
-            ):
-                continue
-            if not _message_visible_to_employee(actor=actor, message=message):
-                continue
-            latest_by_observer[observer_id] = message
-
-    return list(latest_by_observer.values())
+    ranked = Message.select(Message, fn.ROW_NUMBER().over(
+        partition_by=[Message.observer_device],
+        order_by=[Message.created_at.desc(), Message.id.desc()],
+    ).alias("position")).where(Message.created_at > utc_now() - MEDIA_TTL)
+    if actor.current_role != DeviceRole.CHIEF.value:
+        ranked = ranked.where(_not_banned_at(utc_now()), _not_banned_at(Message.created_at))
+    ranked = ranked.alias("ranked_messages")
+    columns = [getattr(ranked.c, field.column_name) for field in Message._meta.sorted_fields]
+    return list(Message.select(*columns).from_(ranked).where(ranked.c.position == 1)
+                .order_by(ranked.c.created_at.desc(), ranked.c.id.desc()).limit(limit).offset(offset))
 
 
 def count_unread_chat_messages(*, actor: Device, observer_device_id: UUID) -> int:
     require_employee_chat_access(actor)
-
-    unread_count = 0
-    query = (
-        Message.select()
-        .where(
-            (Message.observer_device == observer_device_id)
-            & (Message.sender_device == observer_device_id)
-            & (Message.delivered_at.is_null())
-        )
-        .order_by(Message.created_at.asc(), Message.id.asc())
+    query = Message.select().where(
+        (Message.observer_device == observer_device_id)
+        & (Message.sender_device == observer_device_id)
+        & Message.delivered_at.is_null()
     )
-    for message in query:
-        if _message_visible_to_employee(actor=actor, message=message):
-            unread_count += 1
-    return unread_count
+    if actor.current_role != DeviceRole.CHIEF.value:
+        query = query.where(_not_banned_at(Message.created_at))
+    return query.count()
 
 
 def list_chat_messages(
@@ -387,6 +404,7 @@ def list_chat_messages(
     observer_device_id: UUID,
     after_message_id: UUID | None = None,
     limit: int = 50,
+    unreceived_only: bool = False,
 ) -> list[Message]:
     _require_chat_participant(
         actor=actor,
@@ -399,7 +417,13 @@ def list_chat_messages(
         observer_device_id=observer_device_id,
     )
 
-    query = Message.select().where(Message.observer_device == observer_device_id)
+    query = Message.select().where(
+        (Message.observer_device == observer_device_id)
+        & (Message.created_at > utc_now() - MEDIA_TTL)
+    )
+    if unreceived_only:
+        from app.models.privacy import Receipt
+        query = query.where(Message.id.not_in(Receipt.select(Receipt.message_id)))
     if after_message_id is not None:
         after_message = get_message_or_404(after_message_id)
         if str(after_message.observer_device_id) != str(observer_device_id):
@@ -407,7 +431,10 @@ def list_chat_messages(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="after_message_id belongs to another chat",
             )
-        query = query.where(Message.created_at > after_message.created_at)
+        query = query.where(
+            (Message.created_at > after_message.created_at)
+            | ((Message.created_at == after_message.created_at) & (Message.id > after_message.id))
+        )
 
     messages = []
     for message in query.order_by(Message.created_at.asc(), Message.id.asc()):
@@ -457,21 +484,11 @@ def get_message_or_404(message_id: UUID) -> Message:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Message not found",
         )
+    if _as_utc_aware(message.created_at) + MEDIA_TTL <= utc_now():
+        from app.services.privacy import delete_message_data
+        delete_message_data(message)
+        raise HTTPException(410, "Message retention period has ended")
     return message
-
-
-def cleanup_expired_media_files() -> int:
-    deleted_count = 0
-    now = utc_now()
-
-    for media in Media.select():
-        message = Message.get_or_none(Message.id == media.message_id)
-        if message is None:
-            continue
-        if _media_expires_at(message=message, media=media) <= now:
-            deleted_count += int(_delete_media_file_if_exists(media.storage_key))
-
-    return deleted_count
 
 
 def get_media_file_for_message(
@@ -580,6 +597,12 @@ def _resolve_observer_device(
 
 
 def _require_sender_can_create_message(*, sender: Device, client_app: ClientApp) -> None:
+    from app.api.dependencies import require_matching_client
+    from app.services.privacy import require_consent
+    require_matching_client(sender, client_app)
+    if client_app == ClientApp.EMPLOYEE:
+        raise HTTPException(403, "Replies to applicants are not permitted by the regulation")
+    require_consent(sender)
     if client_app == ClientApp.EYEWITNESS and get_active_ban(sender.id) is not None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -593,6 +616,8 @@ def _require_chat_participant(
     client_app: ClientApp,
     observer_device_id: UUID,
 ) -> None:
+    from app.api.dependencies import require_matching_client
+    require_matching_client(actor, client_app)
     observer_exists = Device.select(Device.id).where(Device.id == observer_device_id).exists()
     if not observer_exists:
         raise HTTPException(
@@ -678,7 +703,7 @@ def _require_live_location_sender(*, actor: Device, message: Message) -> None:
 
 def _as_utc_aware(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=_local_timezone()).astimezone(UTC)
+        return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 
@@ -731,14 +756,13 @@ def _validate_media_size(*, mime_type: str, size_bytes: int) -> None:
 
 
 def _media_expires_at(*, message: Message, media: Media) -> datetime:
-    base = media.last_viewed_at if media.last_viewed_at is not None else message.created_at
-    return _as_utc_aware(base) + MEDIA_TTL
+    return _as_utc_aware(message.created_at) + MEDIA_TTL
 
 
 def _delete_media_file_if_exists(storage_key: str) -> bool:
     file_path = _media_file_path(storage_key)
     if file_path.is_file():
-        file_path.unlink()
+        file_path.unlink(missing_ok=True)
         return True
     return False
 

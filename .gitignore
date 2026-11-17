@@ -7,3 +7,8 @@ __pycache__/
 htmlcov/
 *.log
 storage/
+
+local.properties
+
+# Local test execution reports, not application sources.
+/test-results*.xml

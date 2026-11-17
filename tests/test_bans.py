@@ -19,6 +19,10 @@ def register(client, client_app: str, fingerprint: str) -> dict:
         json={"fingerprint_hash": fingerprint * 64},
     )
     assert response.status_code == 200
+    if client_app == "eyewitness":
+        from app.services.privacy import grant_consent, CONSENT_VERSION
+        from app.models.device import Device
+        grant_consent(Device.get_by_id(response.json()["device_id"]), CONSENT_VERSION)
     return response.json()
 
 
@@ -90,8 +94,7 @@ def test_inspector_can_ban_observer_and_observer_messages_are_blocked(client):
     assert inspector_messages.status_code == 403
     assert inspector_messages.json()["detail"] == "Banned chat is visible only to CHIEF"
 
-    assert employee_answer.status_code == 200
-    assert employee_answer.json()["observer_device_id"] == observer["device_id"]
+    assert employee_answer.status_code == 403
 
 
 def test_banned_observer_cannot_send_static_media_or_live_location(client):
@@ -126,8 +129,7 @@ def test_banned_observer_cannot_send_static_media_or_live_location(client):
     assert ban.status_code == 200
     assert static_location.status_code == 403
     assert static_location.json()["detail"] == "Observer device is banned"
-    assert media.status_code == 403
-    assert media.json()["detail"] == "Observer device is banned"
+    assert media.status_code == 410
     assert media_upload.status_code == 403
     assert media_upload.json()["detail"] == "Observer device is banned"
     assert live_location.status_code == 403

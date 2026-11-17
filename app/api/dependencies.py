@@ -9,6 +9,7 @@ from app.services.auth import get_device_by_access_token
 
 def get_authorized_device(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    client_app: Annotated[ClientApp | None, Header(alias="X-Client-App")] = None,
 ) -> Device:
     if authorization is None:
         raise HTTPException(
@@ -29,6 +30,8 @@ def get_authorized_device(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid access token",
         )
+    if client_app is not None:
+        require_matching_client(device, client_app)
 
     return device
 
@@ -41,3 +44,8 @@ def require_employee_client(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Employee client is required",
         )
+
+
+def require_matching_client(device: Device, client_app: ClientApp) -> None:
+    if device.client_app is not None and device.client_app != client_app.value:
+        raise HTTPException(403, "Device belongs to another client application")

@@ -7,12 +7,15 @@ database_proxy = DatabaseProxy()
 
 def init_database(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
+    if not settings.db_password:
+        raise RuntimeError("DB_PASSWORD must be explicitly configured")
     database = PostgresqlDatabase(
         settings.db_name,
         user=settings.db_user,
         password=settings.db_password,
         host=settings.db_host,
         port=settings.db_port,
+        options="-c timezone=UTC",
     )
     database_proxy.initialize(database)
 
@@ -27,6 +30,7 @@ def close_database() -> None:
 
 
 def create_tables() -> None:
+    from app.models.privacy import ConsentEvent, Receipt
     from app.models.ban import Ban
     from app.models.device import Device
     from app.models.live_location_session import LiveLocationSession
@@ -46,6 +50,8 @@ def create_tables() -> None:
             LiveLocationSession,
             LocationPoint,
             Ban,
+            ConsentEvent,
+            Receipt,
         ],
         safe=True,
     )
@@ -57,6 +63,14 @@ def create_tables() -> None:
         ON devices (access_token_hash)
         """
     )
+    database_proxy.execute_sql(
+        "CREATE INDEX IF NOT EXISTS messages_observer_created_idx "
+        "ON messages (observer_device_id, created_at DESC, id DESC)"
+    )
+    database_proxy.execute_sql(
+        "CREATE INDEX IF NOT EXISTS bans_observer_period_idx "
+        "ON bans (observer_device_id, started_at, ends_at)"
+    )
 
 
 def _ensure_device_access_token_hash() -> None:
@@ -65,3 +79,13 @@ def _ensure_device_access_token_hash() -> None:
         database_proxy.execute_sql(
             "ALTER TABLE devices ADD COLUMN access_token_hash VARCHAR(128)"
         )
+    if "access_token_expires_at" not in column_names:
+        database_proxy.execute_sql("ALTER TABLE devices ADD COLUMN access_token_expires_at TIMESTAMP")
+        from datetime import timedelta
+        from app.models.device import Device, utc_now
+        Device.update(access_token_expires_at=utc_now() + timedelta(days=30)).where(
+            Device.access_token_hash.is_null(False)
+        ).execute()
+    if "client_app" not in column_names:
+        database_proxy.execute_sql("ALTER TABLE devices ADD COLUMN client_app VARCHAR(16)")
+        database_proxy.execute_sql("UPDATE devices SET client_app = 'employee' WHERE current_role IS NOT NULL")

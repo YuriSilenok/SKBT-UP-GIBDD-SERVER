@@ -1,150 +1,48 @@
-# SKBT-UP-GIBDD-SERVER
+# Сервер «Трезвый водитель 44»
 
-Минимальный backend-срез для ИС "ГИБДД-Очевидец".
+FastAPI/Peewee API для приложений EYEWITNESS и EMPLOYEE. Рабочее хранилище — PostgreSQL. Python 3.12 использован при проверке.
 
-## Что уже есть
-
-- `GET /health`
-- `POST /api/v1/devices/register`
-- Peewee-модели `devices`, `role_events`, `messages`, `media`, `static_locations`, `live_location_sessions`, `location_points`, `bans`
-- регистрация устройства по `fingerprint_hash`
-- разделение сценариев через `X-Client-App: eyewitness|employee`
-- автоматическое назначение первого `CHIEF` для employee-сценария
-- запись `role_events.AUTO_ASSIGNED`
-- несколько устройств с ролью `CHIEF` разрешены; ограничение "один CHIEF" действует только для автоматического bootstrap
-- текстовые сообщения и список чатов по `messages.observer_device_id`
-- статическая геолокация
-- live-геолокация на 15 минут
-- загрузка и скачивание медиа-файлов с TTL 7 дней
-- блокировка Очевидца: 1 сутки, 30 дней, постоянный бан
-- push-уведомления через `devices.push_token` и Firebase Cloud Messaging
-- WebSocket real-time события для сообщений, live-геолокации, банов и ролей
-- Excel-отчёт для `CHIEF` по банам, ролям и сообщениям
-
-Не добавлены: Docker.
-
-## Требования
-
-- Python 3.11+
-- PostgreSQL
-
-## Локальный запуск
+## Запуск
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock.txt
 cp .env.example .env
-```
-
-Заполнить `.env` под свою отдельную PostgreSQL DB.
-
-Для реальной доставки push-уведомлений через Firebase также заполнить:
-
-```bash
-FCM_PROJECT_ID=<firebase_project_id>
-FCM_SERVICE_ACCOUNT_FILE=/path/to/firebase-service-account.json
-PUSH_REQUEST_TIMEOUT_SECONDS=3
-```
-
-Если эти переменные пустые, API работает, `push_token` сохраняется, но внешняя доставка push пропускается.
-
-Создать таблицы:
-
-```bash
+# Указать отдельную БД, пользователя и надёжный DB_PASSWORD.
 python -m scripts.init_db
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-Пример запуска:
+Перед обновлением существующей базы сделать резервную копию; `scripts.init_db` создаёт таблицы и недостающие поля. Сначала проверить обновление на копии. Старая схема без client_app определяет сотрудников по имеющейся роли; записи без роли требуют контролируемого восстановления, а не публичной смены типа приложения.
+
+API размещать за HTTPS reverse proxy. Внешний доступ к PostgreSQL и порту Uvicorn закрыть. WebSocket требует Upgrade/Connection; тело запроса ограничить 101 MiB. Доверять forwarded headers только локальному reverse proxy, который заменяет входной X-Forwarded-For. Использовать один worker: ограничения запросов и доставка событий находятся в памяти процесса. Не журналировать Authorization, тела, координаты и query string WebSocket с токеном. Настроить мониторинг ошибок удаления и свободного диска. Рабочее размещение по документам — согласованные серверы КГУ в России; VDS используется только для вымышленных тестовых данных.
+
+## Поведение
+
+- Первое employee-устройство получает CHIEF однократно. История AUTO_ASSIGNED предотвращает повторную открытую выдачу; последнего CHIEF нельзя понизить или заблокировать. Изменения сериализуются advisory lock PostgreSQL.
+- Повторная регистрация требует действующий bearer того же устройства; fingerprint сам по себе не является секретом. Токен действует 30 дней и обновляется авторизованной регистрацией.
+- При потере устройства руководителя администратор проверяет UUID новой employee-установки и выполняет `python -m scripts.recover_chief DEVICE_UUID`. Команда не раскрывает токены и не выставляется в Интернет.
+- До согласия нельзя отправлять сообщения, медиа и координаты. Согласие журналируется с версией, временем сервера и временем действия пользователя.
+- EMPLOYEE получает общую запись и явно подтверждает получение. Подтверждение не удаляет запись и не скрывает её от остальных уполномоченных сотрудников. Ответы сотрудника по существу запрещены.
+- Содержание хранится не более 30 суток от создания. Чтение истёкших данных запрещается; фоновая очистка выполняется раз в минуту. Отзыв согласия удаляет собственные сообщения, файлы и геоданные.
+- Firebase, внешние push, карты/CDN и Google location SDK не используются. События доставляются через собственный WSS, предусмотрен опрос. Android может задержать фоновые уведомления.
+- Загрузка требует авторизации до разбора multipart; проверяются размер, тип, права и квота. Прикрепление файлов по публичному storage_key отключено.
+- Юридические тексты: `/legal/policy`, `/legal/consent`, `/legal/regulation`, `/legal/licenses`; состояние и отзыв согласия — `/api/v1/privacy` и `/api/v1/privacy/consent`.
+
+`ADMIN_PANEL_PASSWORD` не задаётся по умолчанию. Дополнительную ручную панель не публиковать: запускать только на localhost с доступом через SSH-туннель. Основные действия сотрудника доступны через EMPLOYEE.
+
+## Проверки
 
 ```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m pytest -q
+# PostgreSQL: отдельная локальная тестовая БД gibdd_test,
+# пользователь gibdd_test, порт 55439; никогда не рабочая БД.
+GIBDD_TEST_POSTGRES=1 python -m pytest -q
 ```
 
-Проверка:
+Тесты SQLite используют временные файлы. PostgreSQL-тесты создают и удаляют уникальные схемы внутри выделенной тестовой БД. Полный PostgreSQL-прогон: 82 успешных теста, SQLite: 79 успешных и 3 пропущенных PostgreSQL-проверки.
 
-```bash
-curl http://127.0.0.1:8000/health
-```
+`scripts.staging_app` — только демонстрационный SQLite-стенд с явными GIBDD_STAGING=1 и GIBDD_STAGING_DIR. Он не заменяет PostgreSQL в рабочем окружении и не подтверждает конкурентную работу PostgreSQL.
 
-Ожидаемый ответ:
-
-```json
-{"status":"ok"}
-```
-
-## Регистрация устройства
-
-Eyewitness:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/devices/register \
-  -H "Content-Type: application/json" \
-  -H "X-Client-App: eyewitness" \
-  -d '{"fingerprint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
-```
-
-Employee:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/devices/register \
-  -H "Content-Type: application/json" \
-  -H "X-Client-App: employee" \
-  -d '{"fingerprint_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
-```
-
-Если в БД еще нет `CHIEF`, первый employee-device получит:
-
-```json
-{"device_id":"...","role":"CHIEF"}
-```
-
-Повторная регистрация того же `fingerprint_hash` возвращает тот же `device_id`.
-
-Bootstrap первого `CHIEF` в PostgreSQL защищен transaction advisory lock. Это нужно только для сценария автоматического назначения, чтобы два первых employee-запроса не получили `CHIEF` одновременно.
-
-## PostgreSQL
-
-Создать отдельную базу для своей реализации. Не использовать БД второго backend.
-
-Пример:
-
-```bash
-sudo -u postgres psql
-```
-
-```sql
-CREATE DATABASE gibdd_<your_name>;
-CREATE USER gibdd_<your_name> WITH PASSWORD 'change_me';
-GRANT ALL PRIVILEGES ON DATABASE gibdd_<your_name> TO gibdd_<your_name>;
-```
-
-Проверка подключения:
-
-```bash
-psql postgresql://gibdd_<your_name>:change_me@127.0.0.1:5432/gibdd_<your_name>
-```
-
-## Тесты
-
-```bash
-pytest
-```
-
-Тесты используют SQLite in-memory и проверяют первый рабочий сценарий без PostgreSQL.
-
-## Поля
-
-`devices.id`: внутренний UUID устройства. Нужен для QR, FK и API.
-
-`devices.fingerprint_hash`: SHA-256 fingerprint устройства. Нужен, чтобы повторно вернуть тот же Device.
-
-`devices.current_role`: текущая роль employee-устройства. Нужна для UI сотрудника и проверки прав.
-
-`devices.push_token`: адрес push-доставки. Android передает FCM token при регистрации устройства. Backend сохраняет токен, обновляет его при повторной регистрации и использует для уведомлений о новых сообщениях и банах.
-
-`devices.last_activity_at`: время последней активности устройства.
-
-`role_events`: история изменений ролей. Сейчас используется для `AUTO_ASSIGNED CHIEF`.
-
-Для `AUTO_ASSIGNED` поле `actor_device_id` равно `NULL`, потому что роль назначает система, а не сотрудническое устройство.
+Состав поставки и полные тексты лицензий находятся в `third_party/`. В корне проекта рядом с тремя репозиториями находятся REQUIREMENTS.md, FIXES.md, LICENSES.md и TEST_RESULTS.md. Уточнение о совместном хранении до 30 суток необходимо согласовать в самих организационных документах, где исходно указано удаление после передачи.

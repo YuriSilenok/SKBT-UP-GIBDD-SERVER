@@ -17,6 +17,10 @@ def register(client, client_app: str, fingerprint: str) -> dict:
         json={"fingerprint_hash": fingerprint * 64},
     )
     assert response.status_code == 200
+    if client_app == "eyewitness":
+        from app.services.privacy import grant_consent, CONSENT_VERSION
+        from app.models.device import Device
+        grant_consent(Device.get_by_id(response.json()["device_id"]), CONSENT_VERSION)
     return response.json()
 
 
@@ -58,7 +62,7 @@ def test_chief_downloads_excel_report_with_required_sheets(client):
 
     assert message.status_code == 200
     assert ban.status_code == 200
-    assert answer.status_code == 200
+    assert answer.status_code == 403
     assert report.status_code == 200
     assert report.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -68,7 +72,7 @@ def test_chief_downloads_excel_report_with_required_sheets(client):
     )
 
     workbook = load_workbook(BytesIO(report.content))
-    assert workbook.sheetnames == ["Bans", "Roles", "Messages"]
+    assert workbook.sheetnames == ["Bans", "Roles", "Messages", "Consents", "Receipts"]
     assert [cell.value for cell in workbook["Bans"][1]] == [
         "ban_id",
         "observer_device_id",
@@ -98,14 +102,14 @@ def test_chief_downloads_excel_report_with_required_sheets(client):
         "last_created_at",
     ]
     assert workbook["Bans"].max_row == 2
-    assert workbook["Messages"].max_row == 3
+    assert workbook["Messages"].max_row == 2
 
     rows = {
         row[0]: row[1:]
         for row in workbook["Messages"].iter_rows(min_row=2, values_only=True)
     }
     assert rows[observer["device_id"]][:6] == (1, 1, 0, 0, 0, 0)
-    assert rows[chief["device_id"]][:6] == (1, 1, 0, 0, 0, 0)
+    assert chief["device_id"] not in rows
 
 
 def test_admin_cannot_download_excel_report(client):

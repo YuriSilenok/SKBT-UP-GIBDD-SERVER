@@ -46,7 +46,6 @@ from app.services.messages import (
     create_media_message,
     create_static_location_message,
     create_text_message,
-    create_uploaded_media_message,
     get_live_location_session_for_message,
     get_media_file_for_message,
     get_media_for_message,
@@ -105,30 +104,23 @@ def post_media_message(
     client_app: ClientApp = Header(alias="X-Client-App"),
     sender: Device = Depends(get_authorized_device),
 ) -> MessageResponse:
-    message = create_media_message(
-        sender=sender,
-        client_app=client_app,
-        storage_key=payload.storage_key,
-        mime_type=payload.mime_type,
-        observer_device_id=payload.observer_device_id,
-    )
-    return _message_response(message)
+    raise HTTPException(410, "Upload media directly; storage_key attachment is disabled")
 
 
 @router.post("/api/v1/messages/media/upload", response_model=MessageResponse)
-async def post_media_upload(
+def post_media_upload(
     file: UploadFile = File(...),
     observer_device_id: Annotated[UUID | None, Form()] = None,
     client_app: ClientApp = Header(alias="X-Client-App"),
     sender: Device = Depends(get_authorized_device),
 ) -> MessageResponse:
-    content = await file.read(MEDIA_UPLOAD_MAX_BYTES + 1)
-    message = create_uploaded_media_message(
+    from app.services.messages import create_streamed_media_message
+    message = create_streamed_media_message(
         sender=sender,
         client_app=client_app,
         filename=file.filename,
         mime_type=file.content_type,
-        content=content,
+        source=file.file,
         observer_device_id=observer_device_id,
     )
     return _message_response(message)
@@ -227,8 +219,10 @@ def get_media_file(
 def get_chats(
     _: None = Depends(require_employee_client),
     actor: Device = Depends(get_authorized_device),
+    limit: Annotated[int, Query(ge=1, le=200)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ChatsResponse:
-    chats = [_chat_response(message, actor) for message in list_chats(actor)]
+    chats = [_chat_response(message, actor) for message in list_chats(actor, limit=limit, offset=offset)]
     return ChatsResponse(chats=chats)
 
 

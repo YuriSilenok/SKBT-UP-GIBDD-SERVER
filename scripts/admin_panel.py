@@ -6,7 +6,7 @@ from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Form, HTTPException, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -51,8 +51,8 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> None
             detail="ADMIN_PANEL_PASSWORD is not configured",
         )
 
-    password_ok = secrets.compare_digest(credentials.password, password)
-    user_ok = secrets.compare_digest(credentials.username, "admin")
+    password_ok = secrets.compare_digest(credentials.password.encode("utf-8"), password.encode("utf-8"))
+    user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), b"admin")
     if not (user_ok and password_ok):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -91,6 +91,7 @@ def index(
 @app.post("/devices/{device_id}/role")
 def update_device_role(
     device_id: UUID,
+    request: Request,
     _: None = Depends(require_admin),
     role: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
@@ -110,16 +111,15 @@ def update_device_role(
     if old_role == new_role:
         return redirect(message="Role is unchanged")
 
-    with database_proxy.atomic():
-        Device.update(current_role=new_role, last_activity_at=utc_now()).where(
-            Device.id == target.id
-        ).execute()
-        RoleEvent.create(
-            actor_device=None,
-            target_device=target.id,
-            action=role_action(old_role=old_role, new_role=new_role).value,
-            role=new_role or old_role,
-        )
+    from app.services.roles import change_role
+    origin = request.headers.get("origin")
+    expected = str(request.base_url).rstrip("/")
+    if origin != expected:
+        raise HTTPException(403, "Same-origin request is required")
+    try:
+        change_role(actor=None, target=target, new_role=new_role)
+    except HTTPException as exc:
+        return redirect(error=exc.detail)
 
     return redirect(message=f"Role updated for {target.id}")
 
