@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Трезвый водитель 44 API"
+    consent_version: str = Field(default="2026-11-17-v1", pattern=r"^[A-Za-z0-9._-]{1,64}$", validation_alias="CONSENT_VERSION")
 
     db_name: str = Field(default="gibdd_local", validation_alias="DB_NAME")
     db_user: str = Field(default="postgres", validation_alias="DB_USER")

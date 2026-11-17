@@ -9,10 +9,15 @@ from app.models.static_location import StaticLocation
 from app.models.location_point import LocationPoint
 from app.models.live_location_session import LiveLocationSession
 from app.models.privacy import ConsentEvent, Receipt
+from app.core.config import get_settings
 
 CONSENT_VERSION = "2026-11-17-v1"
 RETENTION = timedelta(days=30)
 ACKNOWLEDGEMENT = "Ваше сообщение зарегистрировано и передано в компетентные органы"
+
+
+def current_consent_version() -> str:
+    return get_settings().consent_version
 
 
 def _aware(value):
@@ -23,7 +28,7 @@ def has_consent(device: Device) -> bool:
     event = ConsentEvent.select().where(ConsentEvent.device_id == device.id).order_by(
         ConsentEvent.created_at.desc(), ConsentEvent.id.desc()
     ).first()
-    return bool(event and event.action == "GRANTED" and event.version == CONSENT_VERSION
+    return bool(event and event.action == "GRANTED" and event.version == current_consent_version()
                 and _aware(event.created_at) + RETENTION > utc_now())
 
 
@@ -33,7 +38,7 @@ def require_consent(device: Device) -> None:
 
 
 def grant_consent(device: Device, version: str, clicked_at=None) -> dict:
-    if version != CONSENT_VERSION:
+    if version != current_consent_version():
         raise HTTPException(409, "Consent text has changed")
     event = ConsentEvent.create(device_id=device.id, version=version, action="GRANTED", clicked_at=clicked_at or utc_now())
     return {"version": version, "consented_at": event.created_at.isoformat()}
@@ -55,7 +60,7 @@ def delete_message_data(message: Message) -> None:
 def withdraw_consent(device: Device) -> dict:
     for message in Message.select().where(Message.observer_device == device.id):
         delete_message_data(message)
-    ConsentEvent.create(device_id=device.id, version=CONSENT_VERSION, action="WITHDRAWN")
+    ConsentEvent.create(device_id=device.id, version=current_consent_version(), action="WITHDRAWN")
     Device.update(push_token=None).where(Device.id == device.id).execute()
     return {"deleted": True, "notice": "Данные удалены из приложения. Если сведения уже переданы в Госавтоинспекцию, дальнейшее удаление осуществляется Госавтоинспекцией по вашему обращению."}
 

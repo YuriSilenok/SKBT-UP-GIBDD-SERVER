@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, AwareDatetime
 from pathlib import Path
 from app.api.dependencies import get_authorized_device, require_employee_client
 from app.models.device import Device
-from app.services.privacy import CONSENT_VERSION, grant_consent, withdraw_consent, has_consent, acknowledge_receipt
+from app.services.privacy import current_consent_version, grant_consent, withdraw_consent, has_consent, acknowledge_receipt
 
 router = APIRouter(tags=["privacy"])
 LEGAL_DIR = Path(__file__).resolve().parents[1] / "legal"
@@ -18,7 +18,7 @@ class ConsentRequest(BaseModel):
 
 @router.get("/api/v1/privacy")
 def privacy_status(actor: Device = Depends(get_authorized_device)):
-    return {"version": CONSENT_VERSION, "active": has_consent(actor)}
+    return {"version": current_consent_version(), "active": has_consent(actor)}
 
 
 @router.post("/api/v1/privacy/consent")

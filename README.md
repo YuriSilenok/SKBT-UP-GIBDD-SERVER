@@ -46,3 +46,7 @@ GIBDD_TEST_POSTGRES=1 python -m pytest -q
 `scripts.staging_app` — только демонстрационный SQLite-стенд с явными GIBDD_STAGING=1 и GIBDD_STAGING_DIR. Он не заменяет PostgreSQL в рабочем окружении и не подтверждает конкурентную работу PostgreSQL.
 
 Состав поставки и полные тексты лицензий находятся в `third_party/`. В корне проекта рядом с тремя репозиториями находятся REQUIREMENTS.md, FIXES.md, LICENSES.md и TEST_RESULTS.md. Уточнение о совместном хранении до 30 суток необходимо согласовать в самих организационных документах, где исходно указано удаление после передачи.
+
+## Продакшен
+
+Пошаговая инструкция нового домена, PostgreSQL, HTTPS, systemd и выпуска рабочих APK: [docs/PRODUCTION.md](docs/PRODUCTION.md). Готовые шаблоны службы и nginx находятся в deploy/. Версия согласия задаётся CONSENT_VERSION в .env/EnvironmentFile и должна совпадать с consentVersion сборки EYEWITNESS. При её изменении прежние согласия перестают разрешать передачу новых данных.

@@ -246,3 +246,17 @@ def test_admin_panel_requires_same_origin_and_protects_last_chief(client, monkey
         assert Device.get_by_id(chief["device_id"]).current_role == "CHIEF"
     finally:
         panel.close()
+
+
+def test_configured_consent_version_invalidates_previous_grant(client, monkeypatch):
+    from app.core.config import get_settings
+    observer = register(client, "eyewitness", "v")
+    auth = headers(observer, "eyewitness")
+    assert client.get("/api/v1/privacy", headers=auth).json()["active"] is True
+    monkeypatch.setenv("CONSENT_VERSION", "production-v2")
+    get_settings.cache_clear()
+    status = client.get("/api/v1/privacy", headers=auth).json()
+    assert status == {"version": "production-v2", "active": False}
+    assert client.post("/api/v1/privacy/consent", headers=auth, json={"version": CONSENT_VERSION}).status_code == 409
+    assert client.post("/api/v1/privacy/consent", headers=auth, json={"version": "production-v2"}).status_code == 200
+    assert client.get("/api/v1/privacy", headers=auth).json()["active"] is True
