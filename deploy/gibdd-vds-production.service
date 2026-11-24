@@ -1,0 +1,24 @@
+[Unit]
+Description=GIBDD production API
+After=network.target gibdd-postgresql.service
+Requires=gibdd-postgresql.service
+[Service]
+Type=simple
+User=gibddtest
+Group=gibddtest
+WorkingDirectory=/opt/gibdd-test-20261117/source
+EnvironmentFile=/etc/gibdd/production.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/gibdd-test-20261117/venv/bin/python -B -m uvicorn app.main:app --host 127.0.0.1 --port 8441 --workers 1 --limit-concurrency 24 --ws-max-size 1024 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gibdd-test-20261117/staging-ready
+MemoryMax=192M
+TasksMax=48
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy to the test VDS after successful tests (main only)
+        description: Deploy to the production VDS after successful tests (main only)
         type: boolean
         default: true
 
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
-      group: test-vds-deployment
+      group: vds-deployment
       cancel-in-progress: false
     steps:
       - name: Deploy tested commit over restricted SSH
