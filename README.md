@@ -50,3 +50,7 @@ GIBDD_TEST_POSTGRES=1 python -m pytest -q
 ## Продакшен
 
 Пошаговая инструкция нового домена, PostgreSQL, HTTPS, systemd и выпуска рабочих APK: [docs/PRODUCTION.md](docs/PRODUCTION.md). Готовые шаблоны службы и nginx находятся в deploy/. Версия согласия задаётся CONSENT_VERSION в .env/EnvironmentFile и должна совпадать с consentVersion сборки EYEWITNESS. При её изменении прежние согласия перестают разрешать передачу новых данных.
+
+## Автообновление тестовой VDS
+
+Включён [Server CI and VDS deployment](.github/workflows/server-vds.yml). После успешного PostgreSQL-прогона main развёртывается отдельным SSH-ключом с ограниченной командой. На VDS повторяются SQLite-тесты, создаётся backup и проверяется запуск; при сбое выполняется откат. Данные при автообновлении сохраняются. Подробности и ручная очистка только администратором: [deploy/VDS_AUTODEPLOY.md](deploy/VDS_AUTODEPLOY.md).

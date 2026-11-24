@@ -1,0 +1,89 @@
+name: Server CI and VDS deployment
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to the test VDS after successful tests (main only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: gibdd_test
+          POSTGRES_DB: gibdd_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:55439:5432
+        options: >-
+          --health-cmd "pg_isready -U gibdd_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+      - run: python -m pip install -r requirements.lock.txt
+      - name: Test on PostgreSQL
+        env:
+          GIBDD_TEST_POSTGRES: '1'
+        run: python -m pytest -q --tb=short --junitxml=test-results-ci.xml
+      - name: Save test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-tests
+          path: test-results-ci.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: test-vds-deployment
+      cancel-in-progress: false
+    steps:
+      - name: Deploy tested commit over restricted SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.VDS_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ vars.VDS_DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ vars.VDS_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.VDS_DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ vars.VDS_DEPLOY_USER }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_KEY:?Set VDS_DEPLOY_SSH_KEY}"
+          : "${KNOWN_HOSTS:?Set VDS_DEPLOY_KNOWN_HOSTS}"
+          : "${DEPLOY_HOST:?Set VDS_DEPLOY_HOST}"
+          : "${DEPLOY_USER:?Set VDS_DEPLOY_USER}"
+          key="$RUNNER_TEMP/vds-deploy-key"
+          hosts="$RUNNER_TEMP/vds-known-hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          umask 077
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$hosts"
+          ssh -T -i "$key" -p "$DEPLOY_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" "$COMMIT_SHA"
