@@ -1,3 +1,17 @@
+# Production auto-deployment — 24.11.2026
+
+VDS 193.124.115.164 теперь работает на https://силенок.рф/ (443), gibdd.service и отдельном PostgreSQL 17.12. Push main проходит 85 PostgreSQL-тестов CI и запрашивает ограниченный SSH deployment; на VDS выполняется повторный SQLite-прогон на временных фикстурах. Рабочая БД только PostgreSQL, фикстуры не являются рабочим хранилищем.
+
+/etc/gibdd/production.enabled выбирает root-owned update-production-vds.sh через /usr/local/sbin/gibdd-test-deploy (историческое имя диспетчера). Выбор режима и deployment сериализованы lock-файлами. Код/зависимости/тесты запускаются без root. Перед переключением создаются backups/<UTC>-<SHA>/database.dump и media.tar.gz. При ошибке готовности возвращаются прежний systemd drop-in, pg_restore и media. Данные не очищаются; production-контроллер не принимает --reset-data. Исторический SQLite сохранён после миграции как закрытый архив, но не используется рабочим приложением.
+
+Рабочие секреты: /etc/gibdd/production.env, root:gibddtest 0640; PostgreSQL-data /var/lib/gibdd-postgresql/data 0700/gibddpg. Порт 55432 слушает только 127.0.0.1. Доступ к служебному Unix socket — только gibddpg; приложение использует SCRAM по TCP. Рабочие ключи APK отдельно: /var/lib/gibdd-signing root-only и GitHub Secrets APK_RELEASE_*.
+
+Проверка: systemctl status gibdd gibdd-postgresql; curl --fail https://силенок.рф/health; cat /opt/gibdd-test-20261117/deployment.json. Корень сайта и прежний /api/health обслуживает pond; их обновление не входит в этот deployment. Старый порт 4443 перенаправляет на основной HTTPS-домен. Исторический системный пользователь/каталоги с test сохранены для непрерывности прав и резервных копий; это не режим API и не метка APK.
+
+Ниже — историческая инструкция тестового режима. Она применяется только при выключенном production-маркере; удалять маркер на рабочей системе без согласованного плана отката нельзя.
+
+---
+
 # Автообновление существующей тестовой VDS
 
 Сервер: 193.124.115.164. Служба: gibdd-test.service. Адрес: https://силенок.рф:4443/. Это тестовый стенд SQLite; рабочая система использует PostgreSQL по docs/PRODUCTION.md.

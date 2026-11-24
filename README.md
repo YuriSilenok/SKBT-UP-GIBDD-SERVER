@@ -1,3 +1,11 @@
+# Production: Трезвый водитель 44
+
+Текущий API: https://силенок.рф/ (443), служба gibdd.service, PostgreSQL 17.12 на loopback:55432. Домен и сайты других проектов сохранены; API использует /api/v1/, документы /legal/, health /health. Рабочие настройки защищены в /etc/gibdd/production.env. Автообновление main выполняет PostgreSQL CI, повторные проверки на VDS, pg_dump/media backup и переключение с health-check/откатом. Production-диспетчер не очищает БД. См. deploy/VDS_AUTODEPLOY.md и docs/PRODUCTION.md.
+
+Ниже — общие сведения; исторические тестовые команды staging_app не используются рабочей службой.
+
+---
+
 # Сервер «Трезвый водитель 44»
 
 FastAPI/Peewee API для приложений EYEWITNESS и EMPLOYEE. Рабочее хранилище — PostgreSQL. Python 3.12 использован при проверке.
