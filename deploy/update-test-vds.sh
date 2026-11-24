@@ -46,10 +46,14 @@ available=$(df -Pk "$base" | awk 'NR==2 {print $4}')
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 release="$base/releases/$stamp-${sha:0:12}"
 backup="$base/backups/$stamp-${sha:0:12}"
-mkdir "$release"
-git --git-dir="$base/repository.git" archive "$sha" | tar -x -C "$release"
+install -d -o gibddtest -g gibddtest -m 0750 "$release"
+git --git-dir="$base/repository.git" archive "$sha" | runuser -u gibddtest -- tar -x -C "$release"
+if find "$release" -type l -print -quit | grep -q .; then
+    echo 'Symbolic links are not allowed in deployment sources' >&2
+    exit 2
+fi
 printf '%s\n' "$sha" > "$release/DEPLOYED_COMMIT"
-chown -R gibddtest:gibddtest "$release"
+chown -Rh gibddtest:gibddtest "$release"
 locksha=$(sha256sum "$release/requirements.lock.txt" | awk '{print $1}')
 venv="$base/environments/$locksha"
 if [[ ! -f "$venv/.installed" ]]; then
@@ -63,8 +67,9 @@ fi
     cd "$release"
     runuser -u gibddtest -- env PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" -m pytest -q -p no:cacheprovider --tb=short --junitxml="$release/deployment-tests.xml"
 )
-chown -R root:gibddtest "$release" "$venv"
-chmod -R g+rX "$release" "$venv"
+chown -Rh root:gibddtest "$release" "$venv"
+find "$release" "$venv" -type d -exec chmod 0750 {} +
+find "$release" "$venv" -type f -exec chmod g+rX {} +
 install -d -m 0700 "$backup"
 cp /etc/systemd/system/"$service" "$backup/service.original"
 if [[ -f "$dropin" ]]; then cp "$dropin" "$backup/dropin.original"; fi
