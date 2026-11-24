@@ -113,7 +113,7 @@ cat > "$dropin" <<UNIT
 [Service]
 WorkingDirectory=$release
 ExecStart=
-ExecStart=$venv/bin/python -B -m uvicorn app.main:app --host 127.0.0.1 --port 8441 --workers 1 --limit-concurrency 24 --ws-max-size 1024 --no-access-log
+ExecStart=$venv/bin/python -B -m uvicorn app.main:app --host 127.0.0.1 --port 8441 --workers 1 --limit-concurrency 24 --ws-max-size 1024 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
 Environment=DEPLOYED_COMMIT=$sha
 UNIT
 systemctl daemon-reload
