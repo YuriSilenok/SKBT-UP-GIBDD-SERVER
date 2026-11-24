@@ -102,7 +102,12 @@ server {
 NGINX
 nginx -t
 systemctl reload nginx
-curl --fail --silent --max-time 10 --resolve xn--e1afhclgq.xn--p1ai:443:127.0.0.1 https://xn--e1afhclgq.xn--p1ai/health
+https_ready=0
+for attempt in $(seq 1 30); do
+ if curl --fail --silent --show-error --noproxy '*' --max-time 5 --resolve xn--e1afhclgq.xn--p1ai:443:127.0.0.1 https://xn--e1afhclgq.xn--p1ai/health | grep -q '"status":"ok"'; then https_ready=1;break;fi
+ sleep 1
+done
+if [[ "$https_ready" != 1 ]]; then false;fi
 bash "$folder/activate-production-controller.sh"
 systemctl enable gibdd.service
 systemctl disable gibdd-test.service
